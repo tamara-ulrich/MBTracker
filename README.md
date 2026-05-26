@@ -11,7 +11,7 @@ MBTracker helps you maintain the correct time ratios across MB activity types an
 - **Activate** (5–10%) — shadowing, recall flashcards, tutoring
 - **Immerse** — passive listening (goal: 1 hour/day)
 
-Start a timer, stop it when you're done, and log the last character you completed. The app shows whether your ratios are on target and tracks your progress over time.
+On first launch, set the character you were already at before starting to track — so your stats reflect only what you've learned since you began using the app. Then start a timer, stop it when you're done, and log the last character you completed. The app shows whether your ratios are on target and tracks your progress over time.
 
 ## Features
 

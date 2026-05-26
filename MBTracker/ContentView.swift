@@ -15,6 +15,11 @@ struct ContentView: View {
     @AppStorage("todayStartIndex") private var todayStartIndex = 0
     @AppStorage("todayDateKey") private var todayDateKey = ""
     @AppStorage("onboardingDone") private var onboardingDone = false
+    @AppStorage("onboardingLearnedIndex") private var onboardingLearnedIndex = 0
+    @AppStorage("onboardingDateKey") private var onboardingDateKey = ""
+    @AppStorage("onboardingIndexConfirmed") private var onboardingIndexConfirmed = false
+    @AppStorage("timerActivity") private var storedTimerActivity = ""
+    @AppStorage("timerStartTime") private var storedTimerStart: Double = 0
 
     @State private var runningActivity: String? = nil
     @State private var startTime: Date = Date()
@@ -22,8 +27,7 @@ struct ContentView: View {
     @State private var capturedElapsed: Double = 0
     @State private var showStopSheet = false
     @State private var pickerIndex: Int = 0
-    @State private var showEditSheet = false
-    @State private var editingActivity: String = ""
+    @State private var editRequest: EditRequest? = nil
     @State private var showActivityInfo = false
 
     var body: some View {
@@ -44,13 +48,14 @@ struct ContentView: View {
             .sheet(isPresented: $showStopSheet) {
                 stopBuildSheet
             }
-            .sheet(isPresented: $showEditSheet) {
+            .sheet(item: $editRequest) { request in
                 EditSheetView(
-                    editingActivity: editingActivity,
-                    onCancel: { showEditSheet = false },
+                    editingActivity: request.activity,
+                    minDate: onboardingDate,
+                    onCancel: { editRequest = nil },
                     onSave: { date, hours, minutes, itemIndex in
-                        saveEditedTotal(activity: editingActivity, date: date, hours: hours, minutes: minutes, itemIndex: itemIndex)
-                        showEditSheet = false
+                        saveEditedTotal(activity: request.activity, date: date, hours: hours, minutes: minutes, itemIndex: itemIndex)
+                        editRequest = nil
                     },
                     loadData: { activity, date in
                         loadDayDataForEdit(activity: activity, date: date)
@@ -68,17 +73,34 @@ struct ContentView: View {
                     }
                 }
             }
-            .onAppear { resetStartIndexIfNewDay() }
+            .onAppear {
+                resetStartIndexIfNewDay()
+                migrateOnboardingIfNeeded()
+                restoreTimerIfNeeded()
+            }
             .sheet(isPresented: Binding(
                 get: { !onboardingDone },
                 set: { if !$0 { onboardingDone = true } }
             )) {
                 onboardingSheet
             }
+            .sheet(isPresented: Binding(
+                get: { onboardingDone && !onboardingIndexConfirmed },
+                set: { if !$0 { onboardingIndexConfirmed = true } }
+            )) {
+                startingCharacterPrompt
+            }
         }
     }
 
     // MARK: - Today's data
+
+    // Calendar-day midnight of the onboarding day; .distantPast if not yet set.
+    private var onboardingDate: Date {
+        guard !onboardingDateKey.isEmpty,
+              let d = dateFromSnapshotKey(onboardingDateKey) else { return .distantPast }
+        return Calendar.current.startOfDay(for: d)
+    }
 
     private func studyDayStart() -> Date { studyDayStart(for: Date()) }
 
@@ -108,6 +130,18 @@ struct ContentView: View {
         }
     }
 
+    // For users who onboarded before this field existed, infer onboarding date from
+    // the earliest daily snapshot. onboardingLearnedIndex stays 0 as a safe fallback.
+    private func migrateOnboardingIfNeeded() {
+        guard onboardingDone && onboardingDateKey.isEmpty else { return }
+        let snaps = loadDailySnapshots()
+        if let earliest = snaps.keys.sorted().first {
+            onboardingDateKey = earliest
+        } else {
+            onboardingDateKey = snapshotDateKey(for: studyDayStart())
+        }
+    }
+
     private var learnedTodayItems: [LearningItem] {
         guard lastLearnedIndex > todayStartIndex else { return [] }
         let end = min(lastLearnedIndex, allLearningItems.count)
@@ -132,6 +166,16 @@ struct ContentView: View {
 
     private var totalMinutes: Double {
         todayMinutes("Build") + todayMinutes("Get") + todayMinutes("Activate")
+    }
+
+    private var currentLevel: Int {
+        guard lastLearnedIndex > 0 else { return 1 }
+        let idx = min(lastLearnedIndex - 1, allLearningItems.count - 1)
+        return allLearningItems[idx].level
+    }
+
+    private var currentCharNumber: Int {
+        allCharacters.filter { $0.id < lastLearnedIndex }.count
     }
 
     private func currentPct(_ activity: String) -> Double {
@@ -166,6 +210,12 @@ struct ContentView: View {
             .sheet(isPresented: $showActivityInfo) {
                 activityInfoSheet
             }
+
+            Text("Level \(currentLevel)  ·  Character \(currentCharNumber)")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Divider()
 
             ratioRow(activity: "Build", color: .blue,
                      targetMin: buildTargetMin, targetMax: buildTargetMax)
@@ -282,7 +332,7 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if activity == "Build" {
-                    Text("· \(learnedTodayChars) characters, \(learnedTodayWords) words")
+                    Text("· \(learnedTodayChars) characters")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -298,8 +348,7 @@ struct ContentView: View {
 
     private func editButton(for activity: String) -> some View {
         Button {
-            editingActivity = activity
-            showEditSheet = true
+            editRequest = EditRequest(activity: activity)
         } label: {
             Image(systemName: "pencil.circle")
                 .foregroundStyle(.blue)
@@ -324,7 +373,11 @@ struct ContentView: View {
             let storedExclusive = isToday
                 ? lastLearnedIndex
                 : (loadDailySnapshots()[snapshotDateKey(for: dayStart)] ?? (range.start + 1))
-            itemIndex = max(range.start, min(range.end, storedExclusive - 1))
+            let (lowerChar, upperChar) = charBoundsForPicker(range: range)
+            let targetId = storedExclusive - 1
+            let bestChar = allCharacters.last(where: { $0.id <= targetId && $0.id >= lowerChar.id && $0.id <= upperChar.id })
+                ?? lowerChar
+            itemIndex = bestChar.id
         }
         return (hours: hours, minutes: minutes, itemIndex: itemIndex)
     }
@@ -364,8 +417,9 @@ struct ContentView: View {
             let start = max(0, prevSnap.idx - 1)
             return (start: min(start, end), end: max(start, end))
         } else {
-            // No prior snapshot: show a 500-item window anchored at the upper bound.
-            return (start: max(0, end - 499), end: end)
+            // No prior snapshot (first tracked day): onboarding value is the lower bound.
+            let onboardingStart = max(0, onboardingLearnedIndex - 1)
+            return (start: min(onboardingStart, end), end: end)
         }
     }
 
@@ -455,9 +509,9 @@ struct ContentView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 VStack(spacing: 8) {
-                    Text("Which item did you last complete?")
+                    Text("Which character did you last complete?")
                         .font(.headline)
-                    Text("Scroll to the last item you finished. We'll start counting from the next one.")
+                    Text("Scroll to the last character you finished. We'll start counting from the next one.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -465,9 +519,9 @@ struct ContentView: View {
                 }
                 .padding()
 
-                Picker("Starting item", selection: $pickerIndex) {
-                    ForEach(allLearningItems) { item in
-                        Text("\(item.id + 1). \(item.simplified) (\(item.isCharacter ? "char" : "word"))")
+                Picker("Starting character", selection: $pickerIndex) {
+                    ForEach(Array(allCharacters.enumerated()), id: \.element.id) { charIdx, item in
+                        Text("\(charIdx + 1). \(item.simplified)")
                             .tag(item.id)
                     }
                 }
@@ -476,17 +530,70 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Start from beginning") {
+                        if onboardingDateKey.isEmpty {
+                            onboardingLearnedIndex = 0
+                            onboardingDateKey = snapshotDateKey(for: studyDayStart())
+                        }
                         lastLearnedIndex = 0
                         todayStartIndex = 0
                         onboardingDone = true
+                        onboardingIndexConfirmed = true
                     }
                     .foregroundStyle(.secondary)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
+                        if onboardingDateKey.isEmpty {
+                            onboardingLearnedIndex = pickerIndex + 1
+                            onboardingDateKey = snapshotDateKey(for: studyDayStart())
+                        }
                         lastLearnedIndex = pickerIndex + 1
                         todayStartIndex = pickerIndex + 1
                         onboardingDone = true
+                        onboardingIndexConfirmed = true
+                    }
+                }
+            }
+        }
+        .interactiveDismissDisabled()
+    }
+
+    // MARK: - Starting character prompt (shown once for users who migrated from old onboarding)
+
+    private var startingCharacterPrompt: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                VStack(spacing: 8) {
+                    Text("What character were you at when you started tracking?")
+                        .font(.headline)
+                    Text("Scroll to the last character you had completed before you began using MBTracker. Stored once and never changed.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
+                .padding()
+
+                Picker("Starting character", selection: $pickerIndex) {
+                    ForEach(Array(allCharacters.enumerated()), id: \.element.id) { charIdx, item in
+                        Text("\(charIdx + 1). \(item.simplified)")
+                            .tag(item.id)
+                    }
+                }
+                .pickerStyle(.wheel)
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Skip") {
+                        onboardingLearnedIndex = 0
+                        onboardingIndexConfirmed = true
+                    }
+                    .foregroundStyle(.secondary)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onboardingLearnedIndex = pickerIndex + 1
+                        onboardingIndexConfirmed = true
                     }
                 }
             }
@@ -497,20 +604,20 @@ struct ContentView: View {
     // MARK: - Stop Build sheet
 
     private var stopBuildSheet: some View {
-        let defaultIdx = max(0, lastLearnedIndex - 1)
-        let start = max(0, defaultIdx - 5)
-        let end = min(allLearningItems.count - 1, defaultIdx + 300)
-        let window = Array(allLearningItems[start...end])
+        let lastCharIdx = allCharacters.lastIndex(where: { $0.id < lastLearnedIndex }) ?? 0
+        let charWindowStart = max(0, lastCharIdx - 5)
+        let charWindowEnd = min(allCharacters.count - 1, lastCharIdx + 300)
+        let window = Array(allCharacters[charWindowStart...charWindowEnd])
 
         return NavigationStack {
             VStack(spacing: 0) {
-                Text("Which item did you last complete?")
+                Text("Which character did you last complete?")
                     .font(.headline)
                     .padding()
 
-                Picker("Last item", selection: $pickerIndex) {
-                    ForEach(window) { item in
-                        Text("\(item.id + 1). \(item.simplified) (\(item.isCharacter ? "char" : "word"))")
+                Picker("Last character", selection: $pickerIndex) {
+                    ForEach(Array(window.enumerated()), id: \.element.id) { idx, item in
+                        Text("\(charWindowStart + idx + 1). \(item.simplified)")
                             .tag(item.id)
                     }
                 }
@@ -533,12 +640,26 @@ struct ContentView: View {
 
     // MARK: - Actions
 
+    private func restoreTimerIfNeeded() {
+        guard !storedTimerActivity.isEmpty, storedTimerStart > 0 else { return }
+        runningActivity = storedTimerActivity
+        startTime = Date(timeIntervalSinceReferenceDate: storedTimerStart)
+        elapsed = Date().timeIntervalSince(startTime)
+        if storedTimerActivity == "Build" {
+            pickerIndex = allCharacters.last(where: { $0.id < lastLearnedIndex })?.id
+                ?? allCharacters.first?.id ?? 0
+        }
+    }
+
     private func startActivity(_ activity: String) {
         runningActivity = activity
         startTime = Date()
         elapsed = 0
+        storedTimerActivity = activity
+        storedTimerStart = startTime.timeIntervalSinceReferenceDate
         if activity == "Build" {
-            pickerIndex = max(0, lastLearnedIndex - 1)
+            pickerIndex = allCharacters.last(where: { $0.id < lastLearnedIndex })?.id
+                ?? allCharacters.first?.id ?? 0
         }
     }
 
@@ -547,6 +668,8 @@ struct ContentView: View {
         capturedElapsed = elapsed
         runningActivity = nil
         elapsed = 0
+        storedTimerActivity = ""
+        storedTimerStart = 0
 
         if activity == "Build" {
             showStopSheet = true
@@ -576,36 +699,55 @@ struct ContentView: View {
     }
 }
 
+// Converts an item-ID range to the nearest character boundaries on each side.
+// Lower character = "0 new chars this day" (same endpoint as previous day).
+// Upper character = last character reachable by end of the next day.
+func charBoundsForPicker(range: (start: Int, end: Int)) -> (lower: LearningItem, upper: LearningItem) {
+    let lower = allCharacters.last(where: { $0.id <= range.start })
+        ?? allCharacters.first(where: { $0.id > range.start })
+        ?? allCharacters[0]
+    let upper = allCharacters.last(where: { $0.id <= range.end }) ?? lower
+    return (lower: lower, upper: upper.id >= lower.id ? upper : lower)
+}
+
 // MARK: - Edit sheet view
+
+struct EditRequest: Identifiable {
+    let id = UUID()
+    let activity: String
+}
 
 struct EditSheetView: View {
     let editingActivity: String
+    let minDate: Date
     let onCancel: () -> Void
     let onSave: (Date, Int, Int, Int) -> Void
     let loadData: (String, Date) -> (hours: Int, minutes: Int, itemIndex: Int)
     let buildRange: (Date) -> (start: Int, end: Int)
 
     @State private var editingDate: Date = Date()
-    @State private var editHours: Int = 0
-    @State private var editMinutes: Int = 0
+    @State private var editHoursText: String = "0"
+    @State private var editMinutesText: String = "0"
     @State private var editItemIndex: Int = 0
     @FocusState private var focused: Bool
 
     init(
         editingActivity: String,
+        minDate: Date,
         onCancel: @escaping () -> Void,
         onSave: @escaping (Date, Int, Int, Int) -> Void,
         loadData: @escaping (String, Date) -> (hours: Int, minutes: Int, itemIndex: Int),
         buildRange: @escaping (Date) -> (start: Int, end: Int)
     ) {
         self.editingActivity = editingActivity
+        self.minDate = minDate
         self.onCancel = onCancel
         self.onSave = onSave
         self.loadData = loadData
         self.buildRange = buildRange
         let data = loadData(editingActivity, Date())
-        _editHours = State(initialValue: data.hours)
-        _editMinutes = State(initialValue: data.minutes)
+        _editHoursText = State(initialValue: "\(data.hours)")
+        _editMinutesText = State(initialValue: "\(data.minutes)")
         _editItemIndex = State(initialValue: data.itemIndex)
     }
 
@@ -613,11 +755,11 @@ struct EditSheetView: View {
         NavigationStack {
             Form {
                 Section {
-                    DatePicker("Date", selection: $editingDate, in: ...Date(), displayedComponents: .date)
+                    DatePicker("Date", selection: $editingDate, in: minDate...Date(), displayedComponents: .date)
                         .onChange(of: editingDate) { _, newDate in
                             let data = loadData(editingActivity, newDate)
-                            editHours = data.hours
-                            editMinutes = data.minutes
+                            editHoursText = "\(data.hours)"
+                            editMinutesText = "\(data.minutes)"
                             editItemIndex = data.itemIndex
                         }
                 }
@@ -627,7 +769,7 @@ struct EditSheetView: View {
                     HStack {
                         Text("Hours")
                         Spacer()
-                        TextField("0", value: $editHours, format: .number)
+                        TextField("0", text: $editHoursText)
                             .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)
                             .frame(width: 60)
@@ -637,7 +779,7 @@ struct EditSheetView: View {
                     HStack {
                         Text("Minutes")
                         Spacer()
-                        TextField("0", value: $editMinutes, format: .number)
+                        TextField("0", text: $editMinutesText)
                             .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)
                             .frame(width: 60)
@@ -647,15 +789,24 @@ struct EditSheetView: View {
                 }
                 if editingActivity == "Build" {
                     let range = buildRange(editingDate)
-                    let window = Array(allLearningItems[range.start...range.end])
-                    Section("Last item completed") {
-                        Picker("Last item", selection: $editItemIndex) {
-                            ForEach(window) { item in
-                                Text("\(item.id + 1). \(item.simplified) (\(item.isCharacter ? "char" : "word"))")
-                                    .tag(item.id)
+                    let (lowerChar, upperChar) = charBoundsForPicker(range: range)
+                    let charsInRange = allCharacters.filter { $0.id >= lowerChar.id && $0.id <= upperChar.id }
+                    if !charsInRange.isEmpty {
+                        let centerIdx = charsInRange.firstIndex(where: { $0.id >= editItemIndex })
+                            ?? (charsInRange.count - 1)
+                        let charWindowStart = max(0, centerIdx - 10)
+                        let charWindowEnd = min(charsInRange.count - 1, centerIdx + 300)
+                        let window = Array(charsInRange[charWindowStart...charWindowEnd])
+                        let globalOffset = allCharacters.firstIndex(where: { $0.id == window.first?.id }) ?? 0
+                        Section("Last character completed") {
+                            Picker("Last character", selection: $editItemIndex) {
+                                ForEach(Array(window.enumerated()), id: \.element.id) { idx, item in
+                                    Text("\(globalOffset + idx + 1). \(item.simplified)")
+                                        .tag(item.id)
+                                }
                             }
+                            .pickerStyle(.wheel)
                         }
-                        .pickerStyle(.wheel)
                     }
                 }
             }
@@ -671,7 +822,7 @@ struct EditSheetView: View {
                         Button("Done") { focused = false }
                     } else {
                         Button("Save") {
-                            onSave(editingDate, editHours, editMinutes, editItemIndex)
+                            onSave(editingDate, Int(editHoursText) ?? 0, Int(editMinutesText) ?? 0, editItemIndex)
                         }
                     }
                 }

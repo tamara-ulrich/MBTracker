@@ -20,3 +20,5 @@ let allLearningItems: [LearningItem] = {
         )
     }
 }()
+
+let allCharacters: [LearningItem] = allLearningItems.filter(\.isCharacter)

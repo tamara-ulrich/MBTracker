@@ -5,21 +5,14 @@ enum StatsPeriod: String, CaseIterable {
     case week = "7 Days"
     case month = "Month"
     case allTime = "All Time"
-
-    var startDate: Date {
-        let cal = Calendar.current
-        switch self {
-        case .week:    return cal.date(byAdding: .day, value: -7, to: Date())!
-        case .month:   return cal.date(byAdding: .day, value: -30, to: Date())!
-        case .allTime: return .distantPast
-        }
-    }
 }
 
 struct StatsView: View {
     @Query(sort: \StudySession.date) private var allSessions: [StudySession]
     @AppStorage("lastLearnedIndex") private var lastLearnedIndex = 0
     @AppStorage("todayStartIndex") private var todayStartIndex = 0
+    @AppStorage("onboardingLearnedIndex") private var onboardingLearnedIndex = 0
+    @AppStorage("onboardingDateKey") private var onboardingDateKey = ""
     @Environment(\.modelContext) private var modelContext
     @State private var selectedPeriod: StatsPeriod = .week
 
@@ -73,22 +66,66 @@ struct StatsView: View {
 
     // MARK: - Filtered sessions
 
-    private var periodStart: Date { selectedPeriod.startDate }
+    // For week/month: period runs up to (not including) today's study day start,
+    // so only fully completed days are counted. All-time includes today.
+    private var periodStart: Date {
+        let today = dayStart(for: Date())
+        switch selectedPeriod {
+        case .week:    return Calendar.current.date(byAdding: .day, value: -7, to: today)!
+        case .month:   return Calendar.current.date(byAdding: .day, value: -30, to: today)!
+        case .allTime: return .distantPast
+        }
+    }
+
+    private var periodEnd: Date {
+        switch selectedPeriod {
+        case .week, .month: return dayStart(for: Date())
+        case .allTime:      return Date()
+        }
+    }
 
     private var filteredSessions: [StudySession] {
-        allSessions.filter { $0.date >= periodStart }
+        allSessions.filter { $0.date >= periodStart && $0.date < periodEnd }
     }
 
     private var periodStartIndex: Int {
         snapshotEntries.filter { $0.date < periodStart }.last?.endIdx ?? 0
     }
 
-    private var periodItemsLearned: Int {
-        max(0, lastLearnedIndex - periodStartIndex)
+    // For week/month: end at todayStartIndex (= end of yesterday) to exclude today's partial data.
+    private var periodEndIndex: Int {
+        switch selectedPeriod {
+        case .week, .month: return todayStartIndex
+        case .allTime:      return lastLearnedIndex
+        }
     }
 
     private func periodSeconds(_ activity: String) -> Double {
         filteredSessions.filter { $0.activity == activity }.reduce(0) { $0 + $1.durationSeconds }
+    }
+
+    private var onboardingDate: Date? {
+        guard !onboardingDateKey.isEmpty else { return nil }
+        return dateFromSnapshotKey(onboardingDateKey)
+    }
+
+    private var currentCharNumber: Int {
+        allCharacters.filter { $0.id < lastLearnedIndex }.count
+    }
+
+    // Characters learned within the period, floored at the onboarding baseline.
+    private var periodCharsFromOnboarding: Int {
+        let floor = max(onboardingLearnedIndex, periodStartIndex)
+        let s = min(floor, allLearningItems.count)
+        let e = min(periodEndIndex, allLearningItems.count)
+        guard s < e else { return 0 }
+        return allLearningItems[s..<e].filter(\.isCharacter).count
+    }
+
+    private var allTimeChars: Int { currentCharNumber }
+    private var allTimeWords: Int {
+        let e = min(lastLearnedIndex, allLearningItems.count)
+        return allLearningItems[0..<e].filter { !$0.isCharacter }.count
     }
 
     // MARK: - Summary
@@ -98,9 +135,9 @@ struct StatsView: View {
         let get = periodSeconds("Get")
         let activate = periodSeconds("Activate")
         let ratioTotal = build + get + activate
+        let avgImmerseMins = periodSeconds("Immerse") / Double(periodDays) / 60
 
         return Section("Summary") {
-            LabeledContent("Current level", value: "Level \(currentLevel)")
             LabeledContent("Study time", value: formatHours(filteredSessions.filter { $0.activity != "Immerse" }.reduce(0) { $0 + $1.durationSeconds }))
             if ratioTotal > 0 {
                 LabeledContent("Ratios") {
@@ -115,13 +152,19 @@ struct StatsView: View {
                     .font(.subheadline)
                 }
             }
-            LabeledContent("Items learned", value: "\(periodItemsLearned)")
-            LabeledContent("Characters", value: "\(periodChars)")
-            LabeledContent("Words", value: "\(periodWords)")
-            let avgImmerseMins = periodSeconds("Immerse") / Double(periodDays) / 60
-            LabeledContent("Avg immersion/day") {
-                Text(String(format: "%.0f min", avgImmerseMins))
-                    .foregroundStyle(avgImmerseMins >= 60 ? .green : .secondary)
+            switch selectedPeriod {
+            case .week, .month:
+                LabeledContent("Characters", value: "\(periodCharsFromOnboarding)")
+            case .allTime:
+                LabeledContent("Items learned", value: "\(lastLearnedIndex)")
+                LabeledContent("Characters", value: "\(allTimeChars)")
+                LabeledContent("Words", value: "\(allTimeWords)")
+            }
+            if selectedPeriod != .allTime {
+                LabeledContent("Avg immersion/day") {
+                    Text(String(format: "%.0f min", avgImmerseMins))
+                        .foregroundStyle(avgImmerseMins >= 60 ? .green : .secondary)
+                }
             }
         }
     }
@@ -137,8 +180,8 @@ struct StatsView: View {
         case .week:  return 7
         case .month: return 30
         case .allTime:
-            guard let first = allSessions.first else { return 1 }
-            let days = Calendar.current.dateComponents([.day], from: dayStart(for: first.date), to: Date()).day ?? 0
+            let base = onboardingDate ?? allSessions.first?.date ?? Date()
+            let days = Calendar.current.dateComponents([.day], from: dayStart(for: base), to: Date()).day ?? 0
             return max(1, days + 1)
         }
     }
@@ -163,7 +206,7 @@ struct StatsView: View {
             ForEach(dayRecords) { record in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Text(record.date, format: .dateTime.day().month(.abbreviated).year())
+                        Text(record.date, format: .dateTime.weekday(.abbreviated).day().month(.abbreviated).year())
                             .fontWeight(.medium)
                         Spacer()
                         Text(formatHours(record.studySeconds))
@@ -184,8 +227,8 @@ struct StatsView: View {
                             Text("Imm \(formatMins(record.immerseSeconds))").foregroundStyle(.purple)
                         }
                         Spacer()
-                        if record.charsLearned > 0 || record.wordsLearned > 0 {
-                            Text("\(record.charsLearned)c \(record.wordsLearned)w")
+                        if record.charsLearned > 0 {
+                            Text("\(record.charsLearned)c")
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -229,9 +272,15 @@ struct StatsView: View {
                                 .clipShape(Capsule())
                         }
                         Spacer()
-                        Text("\(record.totalItems) items · \(record.charsLearned)c \(record.wordsLearned)w")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        if record.isCompleted {
+                            Text("\(record.totalItems) items · \(record.charsLearned)c \(record.wordsLearned)w")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("\(record.totalChars) chars · \(record.totalWords) words in level")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     HStack(spacing: 4) {
                         Text("\(record.calendarDays) day\(record.calendarDays == 1 ? "" : "s")")
@@ -241,6 +290,12 @@ struct StatsView: View {
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    if !record.isCompleted && record.totalChars > 0 {
+                        let pct = Int(Double(record.charsLearned) / Double(record.totalChars) * 100)
+                        Text("Chars learned: \(record.charsLearned) / \(record.totalChars) (\(pct)%)")
+                            .font(.caption)
+                            .foregroundStyle(.blue)
+                    }
                 }
                 .padding(.vertical, 2)
             }
@@ -278,15 +333,20 @@ struct StatsView: View {
 
         // Build per-day index ranges from snapshot entries + today
         var itemsByDay: [Date: (start: Int, end: Int)] = [:]
-        let periodSnaps = snapshotEntries.filter { $0.date >= periodStart }
+        let periodSnaps = snapshotEntries.filter { $0.date >= periodStart && $0.date < periodEnd }
         var prev = periodStartIndex
         for snap in periodSnaps {
             itemsByDay[snap.date] = (start: prev, end: snap.endIdx)
             prev = snap.endIdx
         }
-        itemsByDay[dayStart(for: Date())] = (start: todayStartIndex, end: lastLearnedIndex)
+        if selectedPeriod == .allTime {
+            itemsByDay[dayStart(for: Date())] = (start: todayStartIndex, end: lastLearnedIndex)
+        }
+
+        let onboardStart = onboardingDate ?? .distantPast
 
         return Set(byDay.keys).union(itemsByDay.keys).sorted(by: >).compactMap { day in
+            guard day >= onboardStart else { return nil }
             let sessions = byDay[day] ?? []
             func sum(_ a: String) -> Double { sessions.filter { $0.activity == a }.reduce(0) { $0 + $1.durationSeconds } }
 
@@ -316,6 +376,8 @@ struct StatsView: View {
         let id: Int
         let level: Int
         let totalItems: Int
+        let totalChars: Int
+        let totalWords: Int
         let charsLearned: Int
         let wordsLearned: Int
         let buildSeconds: Double
@@ -356,6 +418,10 @@ struct StatsView: View {
                 && (endDate == nil || dayStart(for: $0.date) < endDate!)
             }.reduce(0.0) { $0 + $1.durationSeconds }
 
+            let levelRange = allLearningItems[b.start..<b.end]
+            let totalChars = levelRange.filter(\.isCharacter).count
+            let totalWords = levelRange.filter { !$0.isCharacter }.count
+
             let learnedEnd = min(lastLearnedIndex, b.end)
             let learnedRange = allLearningItems[b.start..<learnedEnd]
             let chars = learnedRange.filter(\.isCharacter).count
@@ -363,6 +429,8 @@ struct StatsView: View {
 
             return LevelRecord(id: level, level: level,
                                totalItems: b.end - b.start,
+                               totalChars: totalChars,
+                               totalWords: totalWords,
                                charsLearned: chars,
                                wordsLearned: words,
                                buildSeconds: buildSecs,

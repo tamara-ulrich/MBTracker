@@ -14,6 +14,7 @@ Start a timer for each activity — Build, Get, Activate, or Immerse — and MBT
 **Features:**
 - Track time across all four MB activity types (Build, Get, Activate, Immerse)
 - Real-time ratio display with colour-coded feedback (green = on target)
+- Onboarding lets you set your starting character so progress is tracked correctly from day one
 - Character progress tracking — log your last completed character after each Build session
 - Edit past sessions to correct mistakes or add forgotten entries
 - Statistics screen with 7-day, 30-day, and all-time summaries
