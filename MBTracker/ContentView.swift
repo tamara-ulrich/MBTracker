@@ -119,13 +119,19 @@ struct ContentView: View {
     }
 
     private func resetStartIndexIfNewDay() {
-        let key = studyDayStart().formatted(date: .abbreviated, time: .omitted)
-        if todayDateKey != key {
+        let newKey = snapshotDateKey(for: studyDayStart())
+        // Migrate old locale-dependent format to yyyy-MM-dd without triggering a rollover.
+        let legacyKey = studyDayStart().formatted(date: .abbreviated, time: .omitted)
+        if todayDateKey == legacyKey {
+            todayDateKey = newKey
+            return
+        }
+        if todayDateKey != newKey {
             if !todayDateKey.isEmpty {
                 let previousDayStart = Calendar.current.date(byAdding: .day, value: -1, to: studyDayStart())!
                 recordDailySnapshot(for: previousDayStart, endIndex: lastLearnedIndex)
             }
-            todayDateKey = key
+            todayDateKey = newKey
             todayStartIndex = lastLearnedIndex
         }
     }
